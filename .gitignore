@@ -1,0 +1,8 @@
+# Raw activity files may contain GPS + PII — never commit to a public repo.
+raw/*.fit
+raw/*.zip
+*.fit
+*.zip
+# Local-only GPS exports (opt-in) stay private.
+data/*_route.csv
+__pycache__/
