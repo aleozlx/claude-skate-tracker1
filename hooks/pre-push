@@ -1,0 +1,82 @@
+#!/usr/bin/env bash
+#
+# pre-push privacy guard for skate-tracker.
+#
+# Defense-in-depth: .gitignore is the first line of defense, this hook is the
+# second. It refuses to push if any commit being sent contains raw activity
+# files or raw GPS coordinates that must never reach a public repo.
+#
+# This hook IS version-controlled (it lives in the tracked hooks/ dir), but git
+# never auto-enables hooks from a clone. Activate it once per clone with:
+#
+#     git config core.hooksPath hooks
+#
+# Bypass in a genuine emergency with:  git push --no-verify
+#
+set -euo pipefail
+
+# git passes the remote name as $1 and its URL as $2.
+remote="${1:-origin}"
+zero="0000000000000000000000000000000000000000"
+red=$'\033[31m'; ylw=$'\033[33m'; rst=$'\033[0m'
+fail=0
+
+note() { printf '  %s✗%s %s\n' "$red" "$rst" "$1" >&2; fail=1; }
+
+# Filenames that must never be tracked (raw exports + opt-in local routes).
+forbidden_name() {
+  case "$1" in
+    *.fit|*.FIT|*.zip|*.ZIP|*_route.csv) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+# Content tokens that indicate un-stripped GPS / device identity leaked into a
+# committed text file. The de-identified CSVs never contain these.
+CONTENT_PATTERN='position_lat|position_long|(^|[,"[:space:]])(latitude|longitude|lat|lon|lng)([,"[:space:]]|$)|serial_number|device_serial'
+
+while read -r local_ref local_sha remote_ref remote_sha; do
+  # Skip branch deletions (nothing being added).
+  [ "$local_sha" = "$zero" ] && continue
+
+  # Determine the set of commits actually being pushed.
+  if [ "$remote_sha" = "$zero" ]; then
+    # New branch: everything reachable from the tip but not already published to
+    # this remote. Falls back to the full history when no remote refs exist yet.
+    mapfile -t commits < <(git rev-list "$local_sha" --not --remotes="$remote" 2>/dev/null || git rev-list "$local_sha")
+  else
+    mapfile -t commits < <(git rev-list "${remote_sha}..${local_sha}")
+  fi
+  [ "${#commits[@]}" -eq 0 ] && continue
+
+  # 1) Forbidden filenames anywhere in the pushed tip tree.
+  while IFS= read -r f; do
+    [ -z "$f" ] && continue
+    if forbidden_name "$f"; then
+      note "sensitive file would be published: $f (raw activity / GPS route — keep it gitignored)"
+    fi
+  done < <(git ls-tree -r --name-only "$local_sha")
+
+  # 2) Raw GPS / device-identity tokens in text blobs added by these commits.
+  #    Scan added lines only, so pre-existing docs that merely mention the words
+  #    (like this project's README) do not trip the guard.
+  for c in "${commits[@]}"; do
+    # Added lines (prefix '+') in this commit, excluding diff headers.
+    while IFS= read -r hit; do
+      [ -z "$hit" ] && continue
+      note "possible raw GPS/PII in a committed file: '${hit}' — series/route data must be GPS-stripped before commit"
+    done < <(
+      git show --no-color --unified=0 --diff-filter=AM "$c" -- '*.csv' '*.txt' '*.json' '*.tsv' 2>/dev/null \
+        | grep -E '^\+' | grep -vE '^\+\+\+' | sed 's/^+//' \
+        | grep -InE "$CONTENT_PATTERN" || true
+    )
+  done
+done
+
+if [ "$fail" -ne 0 ]; then
+  printf '\n%spre-push blocked: privacy guard found content that should not be published.%s\n' "$red" "$rst" >&2
+  printf '%sReview the findings above. If this is a false positive, re-run with: git push --no-verify%s\n' "$ylw" "$rst" >&2
+  exit 1
+fi
+
+exit 0
