@@ -1,0 +1,4 @@
+factor,level,start,end,note
+skates,second_pair,2025-03-15,,switched skates; empty end = still true
+altitude,high,2025-02-20,2025-04-10,a stay at altitude; dates are inclusive
+venue,skatepark,2025-04-12,2025-04-12,one row per day works too; rows sharing factor=level are merged

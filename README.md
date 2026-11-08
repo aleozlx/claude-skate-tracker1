@@ -51,10 +51,34 @@ python process_fit.py raw/*.zip --series --hrmax 188 --hrrest 55
 
 # Plot progression once you have a few sessions:
 python plot_progression.py
+
+# Separate practice from conditions (new skates, altitude, venue); see below:
+python trend_models.py --regimes /private/path/regimes.csv
+python plot_progression.py --regimes /private/path/regimes.csv --color-by skates
 ```
 
 Re-running is idempotent: sessions are keyed by ID, so re-processing updates
-rather than duplicates.
+rather than duplicates. Columns you add to `sessions.csv` by hand are kept.
+The session ID is the Garmin activity ID wherever it appears in the filename
+(`<id>.zip`, `<id>_ACTIVITY.fit`, `…-inline_skating-<id>.fit`).
+
+## Practice vs conditions
+
+The efficiency metrics improve with practice, and they also move when
+conditions change. Since each condition usually covers one unbroken stretch of
+dates, comparing condition averages mixes the two up. `trend_models.py` fits a
+practice trend (straight line, and a log learning curve that is fast early and
+slows later) plus one step per condition, and reports each step as "better or
+worse than baseline once practice is accounted for", with standard errors.
+
+Conditions come from a **regimes file**: `factor,level,start,end,note` rows,
+inclusive dates, empty `end` = still true. `regimes.example.csv` shows the
+format with made-up dates.
+
+> **Keep your real regimes file outside this repo.** It records where you were
+> and when. `regimes.csv` is gitignored and the pre-push hook refuses it, and the
+> regime figure (`data/ratio_trend.png`, which draws those dates) is gitignored
+> too.
 
 ## Metrics in sessions.csv
 
@@ -65,6 +89,11 @@ rather than duplicates.
 | `avg_hr`, `z1..z5_pct` | cardiovascular load + zone distribution |
 | `efficiency_index` | `avg_moving_speed / (avg_hr − resting)` — **↑ = more efficient** |
 | `aerobic_te`, `anaerobic_te` | Garmin training-effect scores |
+| `date_local` | start date in the watch's local time (`date` is UTC, so evening sessions can land on the next day) |
+| `sport_name` | sport profile name recorded on the watch; check it if an activity was mis-tagged |
+| `moving_min`, `median_moving_speed_kmh` | rolling time (pauses over 10 s excluded) and its median speed |
+| `moving_hr` | mean HR over rolling samples only; stops are recovery, not effort |
+| `hr_above_rest_per_kmh` | `(moving_hr − resting) / avg_moving_speed` — **↓ = more efficient**; the metric `trend_models.py` uses |
 
 ## What Garmin does NOT capture for skating
 
