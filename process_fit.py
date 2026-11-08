@@ -14,8 +14,8 @@ Usage:
 HRmax / resting HR drive zone + efficiency calcs; override if you know yours:
     python process_fit.py raw/*.fit --hrmax 190 --hrrest 59
 """
-import argparse, csv, glob, os, sys, zipfile, tempfile
-from datetime import datetime
+import argparse, csv, glob, os, re, statistics, sys, zipfile, tempfile
+from datetime import datetime, timedelta
 
 try:
     import fitparse
@@ -34,7 +34,18 @@ AGG_COLUMNS = [
     "calories", "cycles", "ascent_m", "descent_m",
     "aerobic_te", "anaerobic_te",
     "efficiency_index",  # avg_moving_speed / (avg_hr - resting) — rises as you get efficient
+    # Added later; appended so older CSVs keep their column order.
+    "date_local",              # start date in the watch's local time (`date` above is UTC)
+    "sport_name",              # the sport profile name recorded on the device, e.g. "Inline Skating"
+    "moving_min",              # time spent rolling (speed > 0.3 m/s), pauses > 10 s excluded
+    "median_moving_speed_kmh",
+    "moving_hr",               # mean HR over rolling samples only (stops are recovery, not effort)
+    "hr_above_rest_per_kmh",   # (moving_hr - resting) / avg_moving_speed — ↓ = more efficient
 ]
+
+MOVING_MS = 0.3       # m/s; below this the skater is standing
+MAX_GAP_S = 10        # record gaps longer than this are pauses, not rolling time
+FIT_EPOCH = datetime(1989, 12, 31)
 
 def _extract_fit_path(path):
     """Accept a .fit, or a Garmin 'Export Original' .zip containing one .fit."""
@@ -46,6 +57,54 @@ def _extract_fit_path(path):
             f.write(z.read(fit))
         return tmp
     return path
+
+def session_id_from_path(path):
+    """Garmin activity ID from the filename.
+
+    Handles '<id>.zip', '<id>_ACTIVITY.fit' (Export Original / API download) and names that carry
+    the ID after other tokens, like '20250301T1500Z-inline_skating-<id>.fit'. Falls back to the stem.
+    """
+    stem = os.path.splitext(os.path.basename(path))[0]
+    lead = re.match(r"(\d+)(?:_|$)", stem)
+    if lead:
+        return lead.group(1)
+    runs = re.findall(r"\d{9,}", stem)
+    return runs[-1] if runs else stem
+
+def _as_datetime(v):
+    if isinstance(v, datetime):
+        return v
+    if isinstance(v, (int, float)):
+        return FIT_EPOCH + timedelta(seconds=v)
+    return None
+
+def local_offset(fit):
+    """Watch's UTC offset, from the activity message's local_timestamp vs timestamp."""
+    for m in fit.get_messages("activity"):
+        ts, local = _as_datetime(m.get_value("timestamp")), _as_datetime(m.get_value("local_timestamp"))
+        if ts and local:
+            return local - ts
+    return None
+
+def moving_stats(records):
+    """Rolling-only time, median speed and mean HR."""
+    spd, hr, sec, prev = [], [], 0.0, None
+    for r in records:
+        ts = r.get("timestamp")
+        s = r.get("enhanced_speed") if r.get("enhanced_speed") is not None else r.get("speed")
+        if s is not None and s > MOVING_MS:
+            spd.append(s * 3.6)
+            if r.get("heart_rate") is not None:
+                hr.append(r["heart_rate"])
+            if prev is not None and ts is not None:
+                dt = (ts - prev).total_seconds()
+                if 0 < dt <= MAX_GAP_S:
+                    sec += dt
+        if ts is not None:
+            prev = ts
+    return (round(sec / 60, 1),
+            round(statistics.median(spd), 2) if spd else None,
+            round(statistics.mean(hr), 1) if hr else None)
 
 def _first(msgs, field):
     for m in msgs:
@@ -81,9 +140,15 @@ def process(path, hrmax, hrrest):
     avg_mv = sum(moving) / len(moving) if moving else 0
     eff = round(kmh(avg_mv) / (avg_hr - hrrest), 4) if (avg_hr and avg_hr > hrrest) else None
 
+    sport_msgs = list(fit.get_messages("sport"))
+    offset = local_offset(fit)
+    mv_min, med_mv, mv_hr = moving_stats(records)
+    avg_mv_kmh = kmh(avg_mv)
+
     start = sess("start_time")
+    start_local = start + offset if (start and offset is not None) else start
     row = {
-        "session_id": os.path.basename(path).split("_")[0].split(".")[0],
+        "session_id": session_id_from_path(path),
         "date": start.strftime("%Y-%m-%d") if start else "",
         "sport": sess("sport"),
         "distance_km": round((sess("total_distance") or 0) / 1000, 3),
@@ -99,6 +164,12 @@ def process(path, hrmax, hrrest):
         "ascent_m": sess("total_ascent"), "descent_m": sess("total_descent"),
         "aerobic_te": sess("total_training_effect"), "anaerobic_te": sess("total_anaerobic_training_effect"),
         "efficiency_index": eff,
+        "date_local": start_local.strftime("%Y-%m-%d") if start_local else "",
+        "sport_name": _first(sport_msgs, "name"),
+        "moving_min": mv_min,
+        "median_moving_speed_kmh": med_mv,
+        "moving_hr": mv_hr,
+        "hr_above_rest_per_kmh": round((mv_hr - hrrest) / avg_mv_kmh, 2) if (mv_hr and avg_mv_kmh > 0) else None,
     }
     # Hard guard: only whitelisted keys leave this function for the public CSV.
     return {k: row.get(k) for k in AGG_COLUMNS}, records
@@ -155,15 +226,21 @@ def main():
         sys.exit("no files matched")
 
     os.makedirs(os.path.dirname(a.csv), exist_ok=True)
-    existing = {}
+    existing, extra_cols = {}, []
     if os.path.exists(a.csv):
         with open(a.csv) as f:
-            for r in csv.DictReader(f):
+            reader = csv.DictReader(f)
+            # Columns someone added to the CSV by hand are kept, not dropped and not a crash.
+            extra_cols = [c for c in (reader.fieldnames or []) if c not in AGG_COLUMNS]
+            for r in reader:
                 existing[r["session_id"]] = r
+    if extra_cols:
+        print(f"keeping {len(extra_cols)} extra column(s) already in {a.csv}: {', '.join(extra_cols)}")
 
     for p in sorted(paths):
         row, records = process(p, a.hrmax, a.hrrest)
-        existing[row["session_id"]] = row
+        prior = existing.get(row["session_id"], {})
+        existing[row["session_id"]] = {**{c: prior.get(c, "") for c in extra_cols}, **row}
         print(f"{row['session_id']}: {row['distance_km']} km, {row['active_min']} min active, "
               f"avgHR {row['avg_hr']}, eff {row['efficiency_index']}")
         if a.series:
@@ -171,9 +248,10 @@ def main():
         if a.with_gps:
             write_route_local(records, f"data/{row['session_id']}_route.csv")
 
-    rows = sorted(existing.values(), key=lambda r: (r.get("date") or "", r.get("session_id")))
+    rows = sorted(existing.values(),
+                  key=lambda r: (r.get("date_local") or r.get("date") or "", r.get("session_id")))
     with open(a.csv, "w", newline="") as f:
-        w = csv.DictWriter(f, fieldnames=AGG_COLUMNS)
+        w = csv.DictWriter(f, fieldnames=AGG_COLUMNS + extra_cols, restval="")
         w.writeheader()
         w.writerows(rows)
     print(f"\nwrote {len(rows)} sessions -> {a.csv}")

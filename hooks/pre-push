@@ -23,10 +23,11 @@ fail=0
 
 note() { printf '  %s✗%s %s\n' "$red" "$rst" "$1" >&2; fail=1; }
 
-# Filenames that must never be tracked (raw exports + opt-in local routes).
+# Filenames that must never be tracked (raw exports, opt-in local routes, real regimes).
 forbidden_name() {
   case "$1" in
     *.fit|*.FIT|*.zip|*.ZIP|*_route.csv) return 0 ;;
+    regimes.csv|*/regimes.csv) return 0 ;;   # real regime dates = where you were and when
     *) return 1 ;;
   esac
 }

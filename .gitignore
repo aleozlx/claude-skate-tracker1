@@ -6,3 +6,6 @@ raw/*.zip
 # Local-only GPS exports (opt-in) stay private.
 data/*_route.csv
 __pycache__/
+# Regimes record where you were and when: keep the real file outside the repo.
+regimes.csv
+data/ratio_trend.png
