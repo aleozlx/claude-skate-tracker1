@@ -45,6 +45,7 @@ def load_sessions(path, metric="hr_above_rest_per_kmh", min_km=0.0):
                 continue
             r["d"], r["y"] = d, y
             r["w"] = num(r.get("moving_min")) or num(r.get("active_min")) or 0.0
+            r["se"] = num(r.get(f"{metric}_se"))  # standard error, when the metric carries one
             out.append(r)
     out.sort(key=lambda r: (r["d"], r["session_id"]))
     return out
@@ -118,6 +119,33 @@ def ols(X, y, w=None):
         return b, np.full(len(b), float("nan")), dof, rss
     cov = rss / dof * np.linalg.pinv(Xw.T @ Xw)
     return b, np.sqrt(np.diag(cov)), dof, rss
+
+
+def between_variance(X, y, se, iters=60):
+    """Paule-Mandel between-session variance for a weighted regression.
+
+    Each session's metric has its own measurement error se_i, and sessions also differ for reasons
+    the model does not see (sleep, weather, a hard day before). Finds sigma2 >= 0 such that, with
+    weights 1/(se_i^2 + sigma2), the weighted residuals have the variance the degrees of freedom
+    predict. Returns (weights, sigma2); sigma2 = 0 when measurement error explains the scatter.
+    """
+    X, y, v = np.asarray(X, float), np.asarray(y, float), np.asarray(se, float) ** 2
+    dof = len(y) - X.shape[1]
+
+    def excess(s2):
+        _, _, _, rss = ols(X, y, 1.0 / (v + s2))
+        return rss - dof
+
+    if dof <= 0 or excess(0.0) <= 0:
+        return 1.0 / v, 0.0
+    lo, hi = 0.0, float(np.var(y)) * 10 + 1e-9
+    while excess(hi) > 0:
+        hi *= 2
+    for _ in range(iters):
+        mid = (lo + hi) / 2
+        lo, hi = (mid, hi) if excess(mid) > 0 else (lo, mid)
+    s2 = (lo + hi) / 2
+    return 1.0 / (v + s2), s2
 
 
 def t_pvalue(t, dof):

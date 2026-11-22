@@ -9,7 +9,10 @@ one unbroken stretch of dates, comparing condition averages confounds them with 
   1. per condition: n, median, moving-time-weighted mean, and the slope per week inside it;
   2. across all sessions: practice trend + one step per regime indicator, with the trend as a
      straight line and as a log learning curve (fast early gains, then slower), each unweighted
-     and weighted by moving time.
+     and weighted by moving time. When the CSV has a standard-error column (`<metric>_se`,
+     which process_fit.py writes for `hr_above_rest_per_kmh` from session length), also
+     weighted by 1/(se^2 + between-session variance): a 7-minute errand counts for little and
+     nothing has to be dropped.
 
     python trend_models.py --regimes /private/path/regimes.csv
     python trend_models.py --csv data/sessions.csv --regimes regimes.example.csv --min-km 1
@@ -19,8 +22,8 @@ They are model-dependent when conditions don't overlap in time; check that both 
 """
 import argparse, statistics
 
-from skate_analysis import (condition, indicators, learning_x, load_regimes, load_sessions, ols,
-                            t_pvalue, weeks_x)
+from skate_analysis import (between_variance, condition, indicators, learning_x, load_regimes,
+                            load_sessions, ols, t_pvalue, weeks_x)
 
 
 def fmt_coef(name, b, se, dof):
@@ -28,13 +31,25 @@ def fmt_coef(name, b, se, dof):
     return f"   {name:34s} {b:+8.3f}  se {se:6.3f}  p={t_pvalue(t, dof):.3f}"
 
 
+WEIGHTINGS = {
+    None: "",
+    "time": " (weighted by moving time)",
+    "iv": " (weighted by 1/(se^2 + between-session variance))",
+}
+
+
 def fit(rows, cols, weighted):
-    """cols: list of (name, values). Returns printable lines and rss."""
+    """cols: list of (name, values); weighted: None, "time" or "iv". Returns lines, rss, dof, note."""
     X = [[1.0] + [c[1][i] for c in cols] for i in range(len(rows))]
     y = [r["y"] for r in rows]
-    w = [r["w"] for r in rows] if weighted else None
+    note = ""
+    if weighted == "iv":
+        w, s2 = between_variance(X, y, [r["se"] for r in rows])
+        note = f", between-session sd {s2 ** 0.5:.2f}"
+    else:
+        w = [r["w"] for r in rows] if weighted else None
     b, se, dof, rss = ols(X, y, w)
-    return [fmt_coef(n, b[i + 1], se[i + 1], dof) for i, (n, _) in enumerate(cols)], rss, dof
+    return [fmt_coef(n, b[i + 1], se[i + 1], dof) for i, (n, _) in enumerate(cols)], rss, dof, note
 
 
 def main():
@@ -64,7 +79,7 @@ def main():
                 f"weighted mean {wmean:.2f}")
         print(line)
         if len(rs) >= 4:
-            lines, _, _ = fit(rs, [("slope per week", weeks_x(rs))], weighted=False)
+            lines, _, _, _ = fit(rs, [("slope per week", weeks_x(rs))], weighted=None)
             print("\n".join(lines))
         else:
             print("   (fewer than 4 sessions, no slope)")
@@ -73,12 +88,15 @@ def main():
         print("\n(no regimes given: skipping the step models)")
     steps = [(f"step {n}", [f(r["d"]) for r in rows]) for n, f in ind.items()]
     steps = [s for s in steps if 0 < sum(s[1]) < len(rows)]  # a step that never or always applies is not estimable
+    # A metric that carries a standard error (<metric>_se) is also fitted with inverse-variance
+    # weights: short sessions count for little instead of being dropped.
+    has_se = all(r["se"] and r["se"] > 0 for r in rows)
     for trend_name, xs in (("linear trend (per week)", weeks_x(rows)),
                            ("log learning curve", learning_x(rows))):
-        for weighted in (False, True):
-            lines, rss, dof = fit(rows, [(trend_name, xs)] + steps, weighted)
-            print(f"\n== {trend_name} + steps{' (weighted by moving time)' if weighted else ''}"
-                  f"  rss {rss:.1f}, dof {dof}")
+        for weighted in (None, "time", "iv") if has_se else (None, "time"):
+            lines, rss, dof, note = fit(rows, [(trend_name, xs)] + steps, weighted)
+            print(f"\n== {trend_name} + steps{WEIGHTINGS[weighted]}"
+                  f"  rss {rss:.1f}, dof {dof}{note}")
             print("\n".join(lines))
     if steps:
         print("\nSteps are deviations from baseline after the trend. When a condition covers one unbroken")

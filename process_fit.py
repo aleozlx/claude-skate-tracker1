@@ -17,6 +17,8 @@ HRmax / resting HR drive zone + efficiency calcs; override if you know yours:
 import argparse, csv, glob, os, re, statistics, sys, zipfile, tempfile
 from datetime import datetime, timedelta
 
+import session_length
+
 try:
     import fitparse
 except ImportError:
@@ -41,6 +43,7 @@ AGG_COLUMNS = [
     "median_moving_speed_kmh",
     "moving_hr",               # mean HR over rolling samples only (stops are recovery, not effort)
     "hr_above_rest_per_kmh",   # (moving_hr - resting) / avg_moving_speed — ↓ = more efficient
+    "hr_above_rest_per_kmh_se",  # its standard error from session length (session_length.py)
 ]
 
 MOVING_MS = 0.3       # m/s; below this the skater is standing
@@ -113,7 +116,7 @@ def _first(msgs, field):
             return v
     return None
 
-def process(path, hrmax, hrrest):
+def process(path, hrmax, hrrest, se_a=session_length.DEFAULT_A, se_b=session_length.DEFAULT_B):
     fit = fitparse.FitFile(_extract_fit_path(path))
     session = list(fit.get_messages("session"))
     records = [{d.name: d.value for d in m} for m in fit.get_messages("record")]
@@ -171,6 +174,7 @@ def process(path, hrmax, hrrest):
         "moving_hr": mv_hr,
         "hr_above_rest_per_kmh": round((mv_hr - hrrest) / avg_mv_kmh, 2) if (mv_hr and avg_mv_kmh > 0) else None,
     }
+    row["hr_above_rest_per_kmh_se"] = session_length.metric_se(row["hr_above_rest_per_kmh"], mv_min, se_a, se_b)
     # Hard guard: only whitelisted keys leave this function for the public CSV.
     return {k: row.get(k) for k in AGG_COLUMNS}, records
 
@@ -219,6 +223,10 @@ def main():
     ap.add_argument("--with-gps", action="store_true", help="LOCAL-ONLY origin-translated route (gitignored)")
     ap.add_argument("--hrmax", type=int, default=190)
     ap.add_argument("--hrrest", type=int, default=59)
+    ap.add_argument("--se-a", type=float, default=session_length.DEFAULT_A,
+                    help="session-length noise, see validate_session_length.py")
+    ap.add_argument("--se-b", type=float, default=session_length.DEFAULT_B,
+                    help="session-to-session noise floor, see validate_session_length.py")
     a = ap.parse_args()
 
     paths = [p for pat in a.files for p in glob.glob(pat)]
@@ -238,7 +246,7 @@ def main():
         print(f"keeping {len(extra_cols)} extra column(s) already in {a.csv}: {', '.join(extra_cols)}")
 
     for p in sorted(paths):
-        row, records = process(p, a.hrmax, a.hrrest)
+        row, records = process(p, a.hrmax, a.hrrest, a.se_a, a.se_b)
         prior = existing.get(row["session_id"], {})
         existing[row["session_id"]] = {**{c: prior.get(c, "") for c in extra_cols}, **row}
         print(f"{row['session_id']}: {row['distance_km']} km, {row['active_min']} min active, "

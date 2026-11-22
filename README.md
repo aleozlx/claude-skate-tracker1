@@ -52,6 +52,9 @@ python process_fit.py raw/*.zip --series --hrmax 188 --hrrest 55
 # Plot progression once you have a few sessions:
 python plot_progression.py
 
+# Check how session length affects the metric on your data; see below:
+python validate_session_length.py raw/*.zip --hrrest 55
+
 # Separate practice from conditions (new skates, altitude, venue); see below:
 python trend_models.py --regimes /private/path/regimes.csv
 python plot_progression.py --regimes /private/path/regimes.csv --color-by skates
@@ -80,6 +83,41 @@ format with made-up dates.
 > regime figure (`data/ratio_trend.png`, which draws those dates) is gitignored
 > too.
 
+## Session length: weight, don't exclude
+
+Heart rate takes a while to catch up with effort, so it is fair to ask whether
+a 7-minute errand and a 90-minute ride measure the same thing.
+`validate_session_length.py` checks this on your own files with a truncation
+test: every long session is measured whole and again as if it had stopped after
+3, 5, … 30 minutes, both from the start and from the middle.
+
+On the author's sessions the answer was: pieces from the start read about 5%
+low for the first 15 minutes (heart-rate lag), and pieces from the middle show
+no bias. The real effect of length is **noise**: a piece's spread around the
+whole-session value falls from ~17% at 5–10 minutes to ~8% at 20–30 minutes.
+Across sessions, duration and the metric are uncorrelated once practice is
+accounted for. So short sessions are kept and not corrected; they get a
+standard error
+
+```
+sd(log metric) = sqrt(a / L + b)     L = rolling minutes
+```
+
+where `a` is noise that averages out with time and `b` a floor that does not.
+`process_fit.py` writes it as `hr_above_rest_per_kmh_se` (`--se-a`, `--se-b`;
+the defaults were fitted on the author's data, refit yours with the validation
+script). `trend_models.py` then adds a fit weighted by `1/(se² + σ²)`, where σ
+is the between-session spread it estimates (Paule–Mandel). When day-to-day
+variation is larger than measurement noise, as it was here (σ ≈ 2 bpm per km/h),
+these weights come out close to equal and the old moving-time weights turn out
+to have over-trusted long sessions.
+
+Tested and rejected: a model where HR follows speed through a first-order lag
+(fitted time constant plus linear drift). With HR proportional to lagged speed
+it cannot represent the baseline HR of just standing on skates, so calibration
+chose multi-minute lags and short pieces read 20–50% high. The plain ratio was
+already the less biased estimator.
+
 ## Metrics in sessions.csv
 
 | column | meaning |
@@ -94,6 +132,7 @@ format with made-up dates.
 | `moving_min`, `median_moving_speed_kmh` | rolling time (pauses over 10 s excluded) and its median speed |
 | `moving_hr` | mean HR over rolling samples only; stops are recovery, not effort |
 | `hr_above_rest_per_kmh` | `(moving_hr − resting) / avg_moving_speed` — **↓ = more efficient**; the metric `trend_models.py` uses |
+| `hr_above_rest_per_kmh_se` | its standard error from session length (see below); short sessions get wide errors |
 
 ## What Garmin does NOT capture for skating
 
